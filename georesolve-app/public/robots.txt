@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://same-862o1jzz68t-latest.netlify.app/sitemap.xml
+
+# Crawl-delay (optional, helps prevent overloading the server)
+Crawl-delay: 1
