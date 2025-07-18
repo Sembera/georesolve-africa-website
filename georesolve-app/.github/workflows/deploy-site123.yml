@@ -1,0 +1,194 @@
+name: Deploy to Site123
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.same/**'
+
+  # Webhook trigger from CMS
+  repository_dispatch:
+    types: [cms-update, content-update]
+
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 🛒 Checkout repository
+      uses: actions/checkout@v4
+
+    - name: 🏗️ Setup Bun
+      uses: oven-sh/setup-bun@v1
+      with:
+        bun-version: latest
+
+    - name: 📦 Install dependencies
+      run: bun install --frozen-lockfile
+
+    - name: 🔍 Run linter
+      run: bun run lint
+      continue-on-error: true
+
+    - name: 🔨 Build for production
+      run: bun run build:production
+      env:
+        # CMS Configuration (choose one)
+        VITE_CMS_TYPE: ${{ secrets.CMS_TYPE }}
+
+        # Strapi
+        VITE_CMS_API_URL: ${{ secrets.STRAPI_API_URL }}
+        VITE_CMS_TOKEN: ${{ secrets.STRAPI_TOKEN }}
+
+        # Contentful
+        VITE_CONTENTFUL_SPACE_ID: ${{ secrets.CONTENTFUL_SPACE_ID }}
+        VITE_CONTENTFUL_ACCESS_TOKEN: ${{ secrets.CONTENTFUL_ACCESS_TOKEN }}
+
+        # Supabase
+        VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+        # Site configuration
+        VITE_SITE_URL: ${{ secrets.SITE123_URL }}
+        VITE_GA_ID: ${{ secrets.GOOGLE_ANALYTICS_ID }}
+
+    - name: 📊 Build size analysis
+      run: |
+        echo "📊 Build Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+        cd dist && find . -name "*.js" -o -name "*.css" | head -10 | while read file; do
+          size=$(ls -lh "$file" | awk '{print $5}')
+          echo "| $file | $size |" >> $GITHUB_STEP_SUMMARY
+        done
+
+    - name: 🧪 Test build
+      run: |
+        # Check if critical files exist
+        test -f dist/index.html || (echo "❌ index.html missing" && exit 1)
+        test -d dist/assets || (echo "❌ assets directory missing" && exit 1)
+        echo "✅ Build verification passed"
+
+    - name: 📦 Create deployment package
+      run: |
+        cd dist
+        # Create deployment package
+        zip -r9 ../georesolve-site123-$(date +%Y%m%d%H%M%S).zip .
+
+        # Create deployment info
+        cat > DEPLOYMENT_INFO.txt << EOF
+        Deployment Information
+        =====================
+        Date: $(date)
+        Commit: ${{ github.sha }}
+        Branch: ${{ github.ref_name }}
+        Triggered by: ${{ github.event_name }}
+        Environment: ${{ github.event.inputs.environment || 'production' }}
+
+        Files included:
+        $(find . -type f | wc -l) files
+
+        Build size:
+        $(du -sh . | cut -f1)
+
+        Site123 Upload Instructions:
+        1. Login to Site123 dashboard
+        2. Go to Website Manager → Files
+        3. Backup current files
+        4. Upload all files from this package
+        5. Verify deployment at your Site123 URL
+        EOF
+
+    - name: 📤 Deploy to Site123 via FTP
+      if: ${{ secrets.SITE123_FTP_HOST }}
+      uses: SamKirkland/FTP-Deploy-Action@4.3.3
+      with:
+        server: ${{ secrets.SITE123_FTP_HOST }}
+        username: ${{ secrets.SITE123_FTP_USER }}
+        password: ${{ secrets.SITE123_FTP_PASSWORD }}
+        local-dir: ./dist/
+        server-dir: /public_html/
+        exclude: |
+          **/.git*
+          **/.git*/**
+          **/node_modules/**
+          **/.DS_Store
+          **/Thumbs.db
+
+    - name: 📤 Alternative: Upload artifact for manual deployment
+      if: ${{ !secrets.SITE123_FTP_HOST }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: site123-deployment-package
+        path: |
+          dist/
+          georesolve-site123-*.zip
+        retention-days: 30
+
+    - name: 🏷️ Create deployment tag
+      if: github.ref == 'refs/heads/main'
+      run: |
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+
+        TAG="deploy-$(date +%Y%m%d%H%M%S)"
+        git tag -a "$TAG" -m "Auto-deployment to Site123
+
+        Commit: ${{ github.sha }}
+        Date: $(date)
+        Triggered by: ${{ github.event_name }}"
+
+        git push origin "$TAG"
+
+    - name: 📝 Deployment summary
+      run: |
+        echo "🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment**: ${{ github.event.inputs.environment || 'production' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build time**: $(date)" >> $GITHUB_STEP_SUMMARY
+
+        if [ "${{ secrets.SITE123_FTP_HOST }}" ]; then
+          echo "- **Status**: ✅ Automatically deployed to Site123" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Status**: 📦 Package created for manual upload" >> $GITHUB_STEP_SUMMARY
+          echo "- **Download**: Check Actions artifacts tab" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: 🔔 Notify on failure
+      if: failure()
+      run: |
+        echo "❌ Deployment failed!" >> $GITHUB_STEP_SUMMARY
+        echo "Check the logs above for error details." >> $GITHUB_STEP_SUMMARY
+
+  # Optional: Lighthouse performance check
+  lighthouse:
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && secrets.SITE123_URL
+
+    steps:
+    - name: 🔍 Lighthouse audit
+      uses: treosh/lighthouse-ci-action@v10
+      with:
+        urls: ${{ secrets.SITE123_URL }}
+        configPath: '.lighthouserc.json'
+        uploadArtifacts: true
+        temporaryPublicStorage: true
